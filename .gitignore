@@ -1,0 +1,26 @@
+# أسرار وملفات محلية — لا تُرفع أبداً
+.env
+*.env
+.env.*
+*.key
+*.pem
+
+# حالة التطبيق المحلية (نتائج الفحص، مفاتيح مخزنة)
+.state.json
+models_report.json
+
+# بايثون
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# بناء PyInstaller
+build/
+dist/
+*.spec
+
+# نظام التشغيل
+Thumbs.db
+.DS_Store
