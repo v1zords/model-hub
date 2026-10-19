@@ -64,6 +64,7 @@ class ModelWidget:
         self._drag = None
         self._panel_open = False
         self._pending = 0
+        self._mode = "bar"
         # عدادات تراكمية (بدون إعادة حساب كل مرة)
         self._counts = {k: 0 for k in STATUS_COLOR}
         self._counts["UNKNOWN"] = 0
@@ -79,33 +80,60 @@ class ModelWidget:
         self.win.geometry(self._widget_geometry())
         self.win.resizable(False, False)
 
-        self.canvas = tk.Canvas(self.win, width=W, height=H, bg=BG,
-                                highlightthickness=0, bd=0)
+        self.canvas = tk.Canvas(self.win, bg=BG, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
-        self.canvas.create_line(0, H - 1, W, H - 1, fill=BORDER)
 
-        self.dot_id = self.canvas.create_text(20, 18, text="●", fill=GREEN,
+        # عناصر مرسومة بالنسبة لعرض النافذة (تعمل بأي DPI)
+        self._scale = 1.0
+        def S(v):
+            return int(v * self._scale)
+        self.dot_id = self.canvas.create_text(S(24), S(20), text="●", fill=GREEN,
                                               font=("Segoe UI", 14))
-        self.lbl_model_id = self.canvas.create_text(40, 15, text="Model Hub", anchor="w",
+        self.lbl_model_id = self.canvas.create_text(S(44), S(16), text="Model Hub", anchor="w",
                                                     fill=FG, font=("Segoe UI", 12, "bold"))
-        self.lbl_status_id = self.canvas.create_text(40, 34, text="scanning…", anchor="w",
+        self.lbl_status_id = self.canvas.create_text(S(44), S(33), text="scanning…", anchor="w",
                                                      fill=MUTED, font=("Segoe UI", 9))
-        self.chip_ok_id = self.canvas.create_text(240, 22, text="OK 0", anchor="w",
+        self.chip_ok_id = self.canvas.create_text(S(260), S(20), text="OK 0", anchor="w",
                                                   fill=GREEN, font=("Segoe UI", 10, "bold"))
-        self.chip_out_id = self.canvas.create_text(310, 22, text="OUT 0", anchor="w",
+        self.chip_out_id = self.canvas.create_text(S(330), S(20), text="OUT 0", anchor="w",
                                                    fill=RED, font=("Segoe UI", 10, "bold"))
-        self.chip_lim_id = self.canvas.create_text(380, 22, text="LIM 0", anchor="w",
+        self.chip_lim_id = self.canvas.create_text(S(400), S(20), text="LIM 0", anchor="w",
                                                    fill=YELLOW, font=("Segoe UI", 10, "bold"))
-        self.btn_lang_id = self.canvas.create_rectangle(494, 9, 540, 35,
+        self.btn_lang_id = self.canvas.create_rectangle(S(500), S(10), S(548), S(34),
                                                         fill=BG2, outline=BORDER)
-        self.btn_lang_txt = self.canvas.create_text(517, 22, text="عربي", fill=FG,
+        self.btn_lang_txt = self.canvas.create_text(S(524), S(22), text="عربي", fill=FG,
                                                     font=("Segoe UI", 10))
+        # زر التصغير إلى شعار (—)
+        self.btn_min_id = self.canvas.create_rectangle(S(482), S(10), S(494), S(34),
+                                                       fill=BG2, outline=BORDER)
+        self.btn_min_txt = self.canvas.create_text(S(488), S(22), text="—", fill=MUTED,
+                                                   font=("Segoe UI", 10))
         self.canvas.tag_bind(self.btn_lang_id, "<Button-1>", lambda e: self._toggle_lang())
         self.canvas.tag_bind(self.btn_lang_txt, "<Button-1>", lambda e: self._toggle_lang())
+        self.canvas.tag_bind(self.btn_min_id, "<Button-1>", lambda e: self._collapse_to_logo())
+        self.canvas.tag_bind(self.btn_min_txt, "<Button-1>", lambda e: self._collapse_to_logo())
+
+        # عناصر الشعار (نقطة + حرف M) — مخفية افتراضياً
+        self.logo_dot_id = self.canvas.create_text(S(20), S(20), text="●", fill=GREEN,
+                                                   font=("Segoe UI", 20), state="hidden")
+        self.logo_txt_id = self.canvas.create_text(S(20), S(32), text="", anchor="n",
+                                                   fill=GREEN, font=("Segoe UI", 8),
+                                                   state="hidden")
+
+        self._bar_items = [self.dot_id, self.lbl_model_id, self.lbl_status_id,
+                           self.chip_ok_id, self.chip_out_id, self.chip_lim_id,
+                           self.btn_lang_id, self.btn_lang_txt,
+                           self.btn_min_id, self.btn_min_txt]
+        self._logo_items = [self.logo_dot_id, self.logo_txt_id]
+        self._mode = "bar"
 
         self.canvas.bind("<Button-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
+        # النقر على الشعار (في وضع الشعار) يرجع الشريط الكامل
+        self.canvas.tag_bind(self.logo_dot_id, "<Button-1>", lambda e: self._expand_from_logo())
+        self.canvas.tag_bind(self.logo_txt_id, "<Button-1>", lambda e: self._expand_from_logo())
 
         # === اللوحة المنبثقة ===
         self.panel = tk.Toplevel(self.win)
@@ -115,14 +143,28 @@ class ModelWidget:
         self.panel.withdraw()
         self._build_panel()
 
+        self._placed = True
         self.win.after(120, self._poll_queue)
         self.win.after(400, self._startup)
 
     # ------------------------------------------------------------------
     def _widget_geometry(self):
-        sw = self.win.winfo_screenwidth()
-        x = (sw - W) // 2
-        return f"{W}x{H}+{x}+0"
+        """حساب المقاس بالبكسل الفيزيائي الحقيقي — يعمل على أي شاشة/DPI."""
+        try:
+            import ctypes
+            # DPI الشاشة الحقيقي (نسبة للـ 96 الأساسي)
+            hdc = ctypes.windll.user32.GetDC(0)
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # 88 = LOGPIXELSX
+            ctypes.windll.user32.ReleaseDC(0, hdc)
+        except Exception:
+            dpi = 96
+        scale = dpi / 96.0
+        # المقاس الفيزيائي المستهدف: 560×40 دائماً
+        lw = int(560 / scale)
+        lh = int(40 / scale)
+        sw_px = self.win.winfo_screenwidth()
+        x = int((sw_px - lw) // 2)
+        return f"{lw}x{lh}+{x}+0"
 
     def _panel_geometry(self):
         pw, ph = 560, 520
@@ -132,6 +174,61 @@ class ModelWidget:
         if wx + pw > sw:
             wx = sw - pw - 6
         return f"{pw}x{ph}+{max(wx, 0)}+{wy}"
+
+    def _logo_geometry(self):
+        """مقاس الشعار الصغير (نقطة ~30×30 فيزيائي)."""
+        try:
+            import ctypes
+            hdc = ctypes.windll.user32.GetDC(0)
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)
+            ctypes.windll.user32.ReleaseDC(0, hdc)
+        except Exception:
+            dpi = 96
+        scale = dpi / 96.0
+        lw = int(36 / scale)
+        lh = int(36 / scale)
+        x = self.win.winfo_x()
+        return f"{lw}x{lh}+{x}+0"
+
+    def _collapse_to_logo(self):
+        """تصغير الشريط إلى شعار صغير."""
+        try:
+            if self._panel_open:
+                self._toggle_panel()
+        except Exception:
+            pass
+        self._mode = "logo"
+        for iid in self._bar_items:
+            try: self.canvas.itemconfigure(iid, state="hidden")
+            except Exception: pass
+        for iid in self._logo_items:
+            try: self.canvas.itemconfigure(iid, state="normal")
+            except Exception: pass
+        self.win.geometry(self._logo_geometry())
+        # تحديث لون الشعار حسب الحالة
+        self._update_logo_color()
+
+    def _expand_from_logo(self):
+        """النقر على الشعار يرجع الشريط الكامل."""
+        self._mode = "bar"
+        for iid in self._logo_items:
+            try: self.canvas.itemconfigure(iid, state="hidden")
+            except Exception: pass
+        for iid in self._bar_items:
+            try: self.canvas.itemconfigure(iid, state="normal")
+            except Exception: pass
+        self.win.geometry(self._widget_geometry())
+
+    def _update_logo_color(self):
+        """لون الشعار حسب الحالة (أخضر/أحمر/أصفر)."""
+        try:
+            n_ok = sum(1 for r in self._results.values() if r["status"] == "OK")
+            color = GREEN if n_ok > 0 else (RED if any(
+                r["status"] in ("QUOTA",) for r in self._results.values()) else YELLOW)
+            self.canvas.itemconfigure(self.logo_dot_id, fill=color)
+            self.canvas.itemconfigure(self.logo_txt_id, fill=color)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     def _build_panel(self):
@@ -198,6 +295,28 @@ class ModelWidget:
         self.lbl_hint.pack(side="left", padx=10, pady=4)
 
     # ------------------------------------------------------------------
+    def _on_canvas_resize(self, e):
+        """عند تغير حجم النافذة — أعد تمركز العناصر الحالية."""
+        if not hasattr(self, "_placed"):
+            return
+        try:
+            nw = e.width or self.win.winfo_width()
+            nh = e.height or self.win.winfo_height()
+            s = min(nw / 560.0, nh / 40.0)
+            self._scale = s
+            items = [
+                (self.dot_id, (24, 20)), (self.lbl_model_id, (44, 16)),
+                (self.lbl_status_id, (44, 33)),
+                (self.chip_ok_id, (260, 20)), (self.chip_out_id, (330, 20)),
+                (self.chip_lim_id, (400, 20)), (self.btn_lang_txt, (524, 22)),
+            ]
+            for iid, (ix, iy) in items:
+                self.canvas.coords(iid, ix * s, iy * s)
+            x1, y1, x2, y2 = 500 * s, 10 * s, 548 * s, 34 * s
+            self.canvas.coords(self.btn_lang_id, x1, y1, x2, y2)
+        except Exception:
+            pass
+
     def _on_press(self, e):
         self._drag = (e.x_root - self.win.winfo_x(), e.y_root - self.win.winfo_y())
 
@@ -212,6 +331,10 @@ class ModelWidget:
     def _on_release(self, e):
         if self._drag is not None:
             self._drag = None
+            # في وضع الشعار: النقر يرجع الشريط (لا يفتح اللوحة)
+            if self._mode == "logo":
+                self._expand_from_logo()
+                return
             self._toggle_panel()
 
     def _toggle_panel(self):
@@ -408,6 +531,9 @@ class ModelWidget:
             r["status"] in ("QUOTA",) for r in self._results.values()) else YELLOW)
         self.canvas.itemconfigure(self.dot_id, fill=color)
         self._set_status(f"{prov_n}p · {total}m · {len(self._results)}chk")
+        # تحديث لون الشعار إذا كان في وضع الشعار
+        if self._mode == "logo":
+            self._update_logo_color()
 
     # ------------------------------------------------------------------
     def _quick_background_check(self):
